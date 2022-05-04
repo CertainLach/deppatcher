@@ -2,6 +2,22 @@
 
 Utility for mass rewriting of Cargo.toml files
 
+## Usage
+
+Rule - jsonnet function, which receives package description (see [`DirectInput`]), and returns package source (see [`DirectSource`])
+
+I.e you want to rewrite all usages of package `evm` using git repo, you can use this rule:
+
+```jsonnet
+function(pkg) if pkg.package == "evm" then {
+	git: "https://github.com/CertainLach/evm"
+}
+```
+
+To execute this rule, either write `deppatcher patch -e "rule"`, or save it to file, and then `deppatcher patch file.jsonnet`. Patch command receives same arguments as jsonnet interpreter
+
+After rewrite, original package source will be stored in `Cargo.toml`, and can be either restored (`deppatcher revert`), or removed (`deppatcher freeze`)
+
 ## Example scenarios
 
 1. You use substrate, you can only depend on git version, and you can't just specify master branch
