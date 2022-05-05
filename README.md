@@ -59,7 +59,7 @@ function(pkg) if pkg.source.git == "https://github.com/paritytech/substrate" the
 
 deppatcher stores original versions of packages for revert, you need to run `deppatcher freeze` to remove them
 
-2. You depend on https://github.com/paritytech/frontier, this repo has a lot of modules, you need to temporary use local fork.
+2. You depend on <https://github.com/paritytech/frontier>, this repo has a lot of modules, you need to temporary use local fork.
 
 Using `[patch]` and/or manually specifying `path` will work, however, those can only point to virtual manifests, you can't type
 ```toml
@@ -81,4 +81,4 @@ function(pkg) if std.objectHas(frontier, pkg.package) then {
 When you need to switch everything back - use `deppatcher revert` command
 
 ## Alternatives
-https://github.com/bkchr/diener - very limited, you can't update non-substrate dependency (i.e frontier or forked substrate), revert part of patch, or perform any other non-trivial operation. Everything you can do with diener - you also can do with deppatcher
+<https://github.com/bkchr/diener> - very limited, you can't update non-substrate dependency (i.e frontier or forked substrate), revert part of patch, or perform any other non-trivial operation. Everything you can do with diener - you also can do with deppatcher

@@ -1,5 +1,6 @@
 #![warn(clippy::pedantic, clippy::nursery)]
 #![allow(clippy::needless_pass_by_value)]
+#![doc = include_str!("../README.md")]
 
 use std::{
 	env::current_dir,
@@ -35,17 +36,20 @@ where
 }
 
 #[derive(Typed, Debug, Clone, PartialEq, Eq)]
-struct DirectSource {
-	version: Option<String>,
+pub struct DirectSource {
+	/// Package version, None if package is obtained not from registry
+	pub version: Option<String>,
+	/// None for default registry
+	pub registry: Option<String>,
 
-	path: Option<String>,
+	/// Full path to package directory
+	/// (not to workspace containing this package)
+	pub path: Option<String>,
 
-	git: Option<String>,
-	rev: Option<String>,
-	tag: Option<String>,
-	branch: Option<String>,
-
-	registry: Option<String>,
+	pub git: Option<String>,
+	pub rev: Option<String>,
+	pub tag: Option<String>,
+	pub branch: Option<String>,
 }
 impl DirectSource {
 	fn read(table: &dyn TableLike) -> Self {
@@ -84,12 +88,23 @@ impl DirectSource {
 }
 
 #[derive(Typed, Debug, Clone)]
-struct DirectInput {
-	name: String,
-	package: String,
-	source: DirectSource,
+pub struct DirectInput {
+	/// Name with which this package was referenced in `Cargo.toml`
+	/// ```toml
+	/// name = {...}
+	/// ```
+	pub name: String,
+	/// Either referenced name, or explicitly specified package
+	/// ```toml
+	/// package = "1.0"
+	/// name = { package = "package", version = "1.0" }
+	/// ```
+	pub package: String,
+	/// Source, with which this package is currently referenced
+	pub source: DirectSource,
+	/// Backed up package source
 	#[typed(rename = "originalSource")]
-	original_source: DirectSource,
+	pub original_source: DirectSource,
 }
 
 type Key = Vec<String>;
