@@ -10,7 +10,7 @@ use clap::Parser;
 use jrsonnet_cli::{ConfigureState, GeneralOpts, InputOpts};
 use jrsonnet_evaluator::{
     error::{Error, Result},
-    function::{builtin, FuncVal},
+    function::{builtin, CallLocation, FuncVal},
     throw_runtime,
     typed::Either2,
     typed::{Null, Typed},
@@ -304,11 +304,16 @@ enum Opts {
 }
 
 #[builtin]
-fn load_paths(s: State, tree: String) -> Result<ObjValue> {
-    let tree = PathBuf::from(tree);
+fn load_paths(s: State, loc: CallLocation, workspace: String) -> Result<ObjValue> {
+    let mut path = match loc.0 {
+        Some(loc) => loc.0.to_path_buf(),
+        None => throw_runtime!("only callable from jsonnet"),
+    };
+    path.extend(workspace);
+
     let mut command = cargo_metadata::MetadataCommand::new();
     command.no_deps();
-    command.current_dir(tree);
+    command.current_dir(path);
     let metadata = command.exec().run_err()?;
 
     let mut out = ObjValueBuilder::new();

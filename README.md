@@ -18,6 +18,25 @@ To execute this rule, either write `deppatcher patch -e "rule"`, or save it to f
 
 After rewrite, original package source will be stored in `Cargo.toml`, and can be either restored (`deppatcher revert`), or removed (`deppatcher freeze`)
 
+## Usage with local workspaces
+
+For path overrides, cargo expects you to provide full path to dependency, and in case of workspace - path to dependency in this workspace
+
+To simplify things, there is `dpp.loadPaths` helper available, that receives a path to workspace (relative to rule file), and returns object, which maps packages in that workspace to absolute paths to them
+
+I.e for [jrsonnet](https://github.com/CertainLach/jrsonnet) it will return
+```jsonnet
+{
+	jrsonnet: '/code/cmds/jrsonnet',
+	jsonnet: '/code/bindings/jsonnet'
+	'jrsonnet-evaluator': '/code/crates/evaluator',
+	'jrsonnet-parser': '/code/crates/parser',
+	'jrsonnet-interner': '/code/crates/interner',
+	...
+}
+```
+Where `/code/` - absolute path to repository tree
+
 ## Example scenarios
 
 1. You use substrate, you can only depend on git version, and you can't just specify master branch
@@ -62,4 +81,4 @@ function(pkg) if std.objectHas(frontier, pkg.package) then {
 When you need to switch everything back - use `deppatcher revert` command
 
 ## Alternatives
-https://github.com/bkchr/diener - very limited, you can't update non-substrate dependency (i.e frontier), revert part of patch, or perform any other non-trivial operation. Everything you can do with diener - you also can do with deppatcher
+https://github.com/bkchr/diener - very limited, you can't update non-substrate dependency (i.e frontier or forked substrate), revert part of patch, or perform any other non-trivial operation. Everything you can do with diener - you also can do with deppatcher
