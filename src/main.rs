@@ -315,8 +315,13 @@ enum Opts {
 		#[clap(flatten)]
 		general: GeneralOpts,
 	},
-	/// Revert back to original packages version, alias to `patch -e 'function(p) p.originalSource'`
+	/// Revert back to original packages version
 	Revert,
+	/// Rewrite all package sources, to ones defined in specified workspace
+	Link {
+		/// Workspace to link
+		workspace: String,
+	},
 	/// Remove all saved original packages
 	Freeze,
 }
@@ -324,7 +329,10 @@ enum Opts {
 #[builtin]
 fn load_paths(s: State, loc: CallLocation, workspace: String) -> Result<ObjValue> {
 	let mut path = match loc.0 {
-		Some(loc) => loc.0.to_path_buf(),
+		Some(loc) => loc
+			.0
+			.path()
+			.map_or(current_dir().expect("no current dir?"), Path::to_path_buf),
 		None => throw_runtime!("only callable from jsonnet"),
 	};
 	path.push(workspace);
@@ -349,7 +357,24 @@ fn main() -> Result<()> {
 	let mut opts = Opts::parse();
 	if let Opts::Revert = opts {
 		opts = Opts::parse_from(["deppatcher", "patch", "-e", "function(p) p.originalSource"]);
-	};
+	} else if let Opts::Link { workspace } = opts {
+		let mut ext = String::new();
+		ext.push_str("linkTo=");
+		ext.push_str(&workspace);
+		opts = Opts::parse_from([
+			"deppatcher",
+			"patch",
+			"--ext-str",
+			&ext,
+			"-e",
+			r#"
+				local linkTo = dpp.loadPaths(std.extVar('linkTo'));
+				function(pkg) if std.objectHas(linkTo, pkg.package) then {
+					path: linkTo[pkg.package],
+				}
+			"#,
+		]);
+	}
 	match opts {
 		Opts::Freeze => {
 			for entry in walkdir::WalkDir::new(current_dir().run_err()?) {
@@ -360,7 +385,7 @@ fn main() -> Result<()> {
 				}
 			}
 		}
-		Opts::Revert => unreachable!("this is alias"),
+		Opts::Revert | Opts::Link { .. } => unreachable!("this is alias"),
 		Opts::Patch { input, general } => {
 			let s = State::default();
 
@@ -376,13 +401,13 @@ fn main() -> Result<()> {
 			general.configure(&s)?;
 
 			let mutator = if input.exec {
-				s.evaluate_snippet_raw(PathBuf::from("<cmdline>").into(), input.input.into())?
+				s.evaluate_snippet("<cmdline>".to_string(), input.input)?
 			} else if input.input.as_str() == "-" {
 				let mut code = String::new();
 				stdin().read_to_string(&mut code).run_err()?;
-				s.evaluate_snippet_raw(PathBuf::from("<stdin>").into(), code.into())?
+				s.evaluate_snippet("<stdin>".to_string(), code)?
 			} else {
-				s.evaluate_file_raw(&PathBuf::from(input.input))?
+				s.import(PathBuf::from(input.input))?
 			};
 			let mutator = FuncVal::from_untyped(mutator, s.clone())?;
 			let mutator = mutator.into_native::<((DirectInput,), Either![Null, DirectSource])>();
