@@ -14,13 +14,13 @@ function(pkg) if pkg.package == "evm" then {
 }
 ```
 
+To execute this rule, either write `deppatcher patch -e "rule"`, or save it to file, and then `deppatcher patch file.jsonnet`. Patch command receives same arguments as jsonnet interpreter
+
 To quickly override all used packages with ones defined in other workspace use
 
 ```shell
 deppatcher link /home/lach/build/my-evm-fork
 ```
-
-To execute this rule, either write `deppatcher patch -e "rule"`, or save it to file, and then `deppatcher patch file.jsonnet`. Patch command receives same arguments as jsonnet interpreter
 
 After rewrite, original package source will be stored in `Cargo.toml`, and can be either restored (`deppatcher revert`), or removed (`deppatcher freeze`)
 
