@@ -183,10 +183,10 @@ version = "0.1.0"
 dependencies = [
  "cargo_metadata",
  "clap",
- "gcmodule",
  "itertools",
  "jrsonnet-cli",
  "jrsonnet-evaluator",
+ "jrsonnet-gcmodule",
  "toml_edit",
  "tracing",
  "tracing-subscriber",
@@ -194,36 +194,10 @@ dependencies = [
 ]
 
 [[package]]
-name = "dtoa"
-version = "0.4.8"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "56899898ce76aaf4a0f24d914c97ea6ed976d42fec6ad33fcbb0a1103e07b2b0"
-
-[[package]]
 name = "either"
 version = "1.6.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e78d4f1cc4ae33bbfc157ed5d5a5ef3bc29227303d595861deb238fcec4e9457"
-
-[[package]]
-name = "gcmodule"
-version = "0.3.3"
-source = "git+https://github.com/CertainLach/gcmodule?branch=jrsonnet#f72713c24c2b1bf5a78f1d01bee5a0f52bc2a094"
-dependencies = [
- "gcmodule_derive",
- "parking_lot",
-]
-
-[[package]]
-name = "gcmodule_derive"
-version = "0.3.3"
-source = "git+https://github.com/CertainLach/gcmodule?branch=jrsonnet#f72713c24c2b1bf5a78f1d01bee5a0f52bc2a094"
-dependencies = [
- "proc-macro2",
- "quote",
- "syn",
- "synstructure",
-]
 
 [[package]]
 name = "getrandom"
@@ -294,24 +268,24 @@ checksum = "1aab8fc367588b89dcee83ab0fd66b72b50b72fa1904d7095045ace2b0c81c35"
 [[package]]
 name = "jrsonnet-cli"
 version = "0.4.2"
-source = "git+https://github.com/CertainLach/jrsonnet?branch=gcmodule#c35e2bd7f3f9f23272e2232ffea0f737a26fc070"
+source = "git+https://github.com/CertainLach/jrsonnet?branch=master#93c371f4fd9eed01d16de6f426ce90d0d23bc84f"
 dependencies = [
  "clap",
- "gcmodule",
  "jrsonnet-evaluator",
+ "jrsonnet-gcmodule",
  "jrsonnet-parser",
 ]
 
 [[package]]
 name = "jrsonnet-evaluator"
 version = "0.4.2"
-source = "git+https://github.com/CertainLach/jrsonnet?branch=gcmodule#c35e2bd7f3f9f23272e2232ffea0f737a26fc070"
+source = "git+https://github.com/CertainLach/jrsonnet?branch=master#93c371f4fd9eed01d16de6f426ce90d0d23bc84f"
 dependencies = [
  "annotate-snippets",
  "base64",
  "bincode",
- "gcmodule",
  "hashbrown 0.12.1",
+ "jrsonnet-gcmodule",
  "jrsonnet-interner",
  "jrsonnet-macros",
  "jrsonnet-parser",
@@ -322,19 +296,40 @@ dependencies = [
  "rustc-hash",
  "serde",
  "serde_json",
- "serde_yaml",
+ "serde_yaml_with_quirks",
  "static_assertions",
  "strsim",
  "thiserror",
 ]
 
 [[package]]
+name = "jrsonnet-gcmodule"
+version = "0.3.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "22d4e1572e4b61e4f5deb3701312a330df0e69b48805a540d740e5e53ac8c78a"
+dependencies = [
+ "jrsonnet-gcmodule-derive",
+ "parking_lot",
+]
+
+[[package]]
+name = "jrsonnet-gcmodule-derive"
+version = "0.3.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ae2f3bf7d38e0a9098b5b9062a7d9e7a97a206bc3c91118d76e7e37f2e0f1202"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn",
+]
+
+[[package]]
 name = "jrsonnet-interner"
 version = "0.4.2"
-source = "git+https://github.com/CertainLach/jrsonnet?branch=gcmodule#c35e2bd7f3f9f23272e2232ffea0f737a26fc070"
+source = "git+https://github.com/CertainLach/jrsonnet?branch=master#93c371f4fd9eed01d16de6f426ce90d0d23bc84f"
 dependencies = [
- "gcmodule",
  "hashbrown 0.12.1",
+ "jrsonnet-gcmodule",
  "rustc-hash",
  "serde",
 ]
@@ -342,7 +337,7 @@ dependencies = [
 [[package]]
 name = "jrsonnet-macros"
 version = "0.4.2"
-source = "git+https://github.com/CertainLach/jrsonnet?branch=gcmodule#c35e2bd7f3f9f23272e2232ffea0f737a26fc070"
+source = "git+https://github.com/CertainLach/jrsonnet?branch=master#93c371f4fd9eed01d16de6f426ce90d0d23bc84f"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -352,9 +347,9 @@ dependencies = [
 [[package]]
 name = "jrsonnet-parser"
 version = "0.4.2"
-source = "git+https://github.com/CertainLach/jrsonnet?branch=gcmodule#c35e2bd7f3f9f23272e2232ffea0f737a26fc070"
+source = "git+https://github.com/CertainLach/jrsonnet?branch=master#93c371f4fd9eed01d16de6f426ce90d0d23bc84f"
 dependencies = [
- "gcmodule",
+ "jrsonnet-gcmodule",
  "jrsonnet-interner",
  "peg",
  "serde",
@@ -364,14 +359,14 @@ dependencies = [
 [[package]]
 name = "jrsonnet-stdlib"
 version = "0.4.2"
-source = "git+https://github.com/CertainLach/jrsonnet?branch=gcmodule#c35e2bd7f3f9f23272e2232ffea0f737a26fc070"
+source = "git+https://github.com/CertainLach/jrsonnet?branch=master#93c371f4fd9eed01d16de6f426ce90d0d23bc84f"
 
 [[package]]
 name = "jrsonnet-types"
 version = "0.4.2"
-source = "git+https://github.com/CertainLach/jrsonnet?branch=gcmodule#c35e2bd7f3f9f23272e2232ffea0f737a26fc070"
+source = "git+https://github.com/CertainLach/jrsonnet?branch=master#93c371f4fd9eed01d16de6f426ce90d0d23bc84f"
 dependencies = [
- "gcmodule",
+ "jrsonnet-gcmodule",
  "peg",
 ]
 
@@ -614,12 +609,13 @@ dependencies = [
 ]
 
 [[package]]
-name = "serde_yaml"
-version = "0.8.21"
-source = "git+https://github.com/CertainLach/serde-yaml?branch=feature/old-octals-quirk#4bf0e325243539fdeb419e8d727ed1c161cbe445"
+name = "serde_yaml_with_quirks"
+version = "0.8.24"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "47c5983eba86eae2d0058c35fb1065ccffb23af7f8965871069269088098321a"
 dependencies = [
- "dtoa",
  "indexmap",
+ "ryu",
  "serde",
  "yaml-rust",
 ]
@@ -659,18 +655,6 @@ checksum = "7ff7c592601f11445996a06f8ad0c27f094a58857c2f89e97974ab9235b92c52"
 dependencies = [
  "proc-macro2",
  "quote",
- "unicode-xid",
-]
-
-[[package]]
-name = "synstructure"
-version = "0.12.6"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f36bdaa60a83aca3921b5259d5400cbf5e90fc51931376a9bd4a0eb79aa7210f"
-dependencies = [
- "proc-macro2",
- "quote",
- "syn",
  "unicode-xid",
 ]
 
