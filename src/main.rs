@@ -13,12 +13,12 @@ use std::{
 use clap::Parser;
 use jrsonnet_cli::{ConfigureState, GeneralOpts, InputOpts};
 use jrsonnet_evaluator::{
-	error::{Error, Result},
+	error::{Result, ErrorKind},
 	function::{builtin, CallLocation, FuncVal},
-	throw_runtime,
-	typed::Either2,
+	typed::{Either2, NativeFn},
 	typed::{Null, Typed},
 	Either, ObjValue, ObjValueBuilder, State, Val,
+	throw, val::StrValue, trace::PathResolver, Thunk,
 };
 use toml_edit::{Document, InlineTable, Item, Table, TableLike, Value};
 use tracing::info;
@@ -31,7 +31,7 @@ where
 	E: ToString,
 {
 	fn run_err(self) -> Result<T> {
-		Ok(self.map_err(|e| Error::RuntimeError(e.to_string().into()))?)
+		Ok(self.map_err(|e| ErrorKind::RuntimeError(e.to_string().into()))?)
 	}
 }
 
@@ -109,10 +109,9 @@ pub struct DirectInput {
 
 type Key = Vec<String>;
 
-type Mutator = dyn Fn(State, DirectInput) -> Result<Either![Null, DirectSource]>;
+type Mutator = dyn Fn(DirectInput) -> Result<Either![Null, DirectSource]>;
 
 fn patch_dep(
-	s: State,
 	originals: &mut Item,
 	key: &mut Key,
 	dep: &mut dyn TableLike,
@@ -136,7 +135,7 @@ fn patch_dep(
 		source: source.clone(),
 		original_source: original_source.clone(),
 	};
-	let new_source = if let Either2::B(new_source) = mutator(s, input)? {
+	let new_source = if let Either2::B(new_source) = mutator(input)? {
 		new_source
 	} else {
 		return Ok(());
@@ -169,7 +168,6 @@ fn patch_dep(
 }
 
 fn patch_dep_table(
-	s: State,
 	originals: &mut Item,
 	key: &mut Key,
 	deps: &mut Table,
@@ -180,14 +178,13 @@ fn patch_dep_table(
 		.filter_map(|(k, t)| t.as_table_like_mut().map(|t| (k, t)))
 	{
 		key.push(d.get().to_owned());
-		patch_dep(s.clone(), originals, key, table, mutator)?;
+		patch_dep(originals, key, table, mutator)?;
 		key.pop();
 	}
 	Ok(())
 }
 
 fn patch_target_table(
-	s: State,
 	originals: &mut Item,
 	key: &mut Key,
 	target: &mut Table,
@@ -196,7 +193,7 @@ fn patch_target_table(
 	for kind in ["dependencies", "dev-dependencies", "build-dependencies"] {
 		if let Some(deps) = target.get_mut(kind).and_then(Item::as_table_mut) {
 			key.push(kind.to_owned());
-			patch_dep_table(s.clone(), originals, key, deps, mutator)?;
+			patch_dep_table(originals, key, deps, mutator)?;
 			key.pop();
 		}
 	}
@@ -251,7 +248,7 @@ fn freeze(path: &Path) -> Result<()> {
 	Ok(())
 }
 
-fn patch(s: State, path: &Path, mutator: &Mutator) -> Result<()> {
+fn patch(path: &Path, mutator: &Mutator) -> Result<()> {
 	let toml = fs::read_to_string(path).run_err()?;
 	let mut doc: Document = toml.parse().run_err()?;
 	let mut originals = get_item(
@@ -266,13 +263,13 @@ fn patch(s: State, path: &Path, mutator: &Mutator) -> Result<()> {
 	});
 
 	if !originals.is_table() {
-		throw_runtime!("originals should be table");
+		throw!("originals should be table");
 	}
 
 	let table = doc.as_table_mut();
 
 	let mut key = Vec::new();
-	patch_target_table(s.clone(), &mut originals, &mut key, table, mutator)?;
+	patch_target_table(&mut originals, &mut key, table, mutator)?;
 	if let Some(table) = table.get_mut("target").and_then(Item::as_table_mut) {
 		key.push("target".to_owned());
 		for (k, table) in table
@@ -280,7 +277,7 @@ fn patch(s: State, path: &Path, mutator: &Mutator) -> Result<()> {
 			.filter_map(|(k, t)| t.as_table_mut().map(|t| (k, t)))
 		{
 			key.push(k.get().to_owned());
-			patch_target_table(s.clone(), &mut originals, &mut key, table, mutator)?;
+			patch_target_table(&mut originals, &mut key, table, mutator)?;
 			key.pop();
 		}
 		key.pop();
@@ -327,13 +324,13 @@ enum Opts {
 }
 
 #[builtin]
-fn load_paths(s: State, loc: CallLocation, workspace: String) -> Result<ObjValue> {
+fn load_paths(loc: CallLocation, workspace: String) -> Result<ObjValue> {
 	let mut path = match loc.0 {
 		Some(loc) => loc
-			.0
+			.0.source_path()
 			.path()
 			.map_or(current_dir().expect("no current dir?"), Path::to_path_buf),
-		None => throw_runtime!("only callable from jsonnet"),
+		None => throw!("only callable from jsonnet"),
 	};
 	path.push(workspace);
 
@@ -346,7 +343,7 @@ fn load_paths(s: State, loc: CallLocation, workspace: String) -> Result<ObjValue
 	for package in &metadata.packages {
 		let path = package.manifest_path.parent().unwrap();
 		out.member(package.name.clone().into())
-			.value(s.clone(), Val::Str(path.to_string().into()))?;
+			.value(Val::Str(StrValue::Flat(path.to_string().into())))?;
 	}
 	Ok(out.build())
 }
@@ -391,12 +388,13 @@ fn main() -> Result<()> {
 
 			let mut dpp = ObjValueBuilder::new();
 			dpp.member("loadPaths".into()).value(
-				s.clone(),
 				Val::Func(FuncVal::StaticBuiltin(load_paths::INST)),
 			)?;
 			let dpp = dpp.build();
 
-			s.settings_mut().globals.insert("dpp".into(), Val::Obj(dpp));
+			let std = jrsonnet_stdlib::ContextInitializer::new(s.clone(), PathResolver::new_cwd_fallback());
+			std.settings_mut().globals.insert("dpp".into(), Thunk::evaluated(Val::Obj(dpp)));
+			s.set_context_initializer(std);
 
 			general.configure(&s)?;
 
@@ -409,14 +407,13 @@ fn main() -> Result<()> {
 			} else {
 				s.import(PathBuf::from(input.input))?
 			};
-			let mutator = FuncVal::from_untyped(mutator, s.clone())?;
-			let mutator = mutator.into_native::<((DirectInput,), Either![Null, DirectSource])>();
+			let mutator = <NativeFn<((DirectInput,), Either![Null, DirectSource])>>::from_untyped(mutator)?;
 
 			for entry in walkdir::WalkDir::new(current_dir().run_err()?) {
 				let entry = entry.run_err()?;
 				if entry.file_type().is_file() && entry.path().ends_with("Cargo.toml") {
 					info!("patching {}", entry.path().display());
-					patch(s.clone(), entry.path(), &mutator)?;
+					patch(entry.path(), &*mutator)?;
 				}
 			}
 		}
