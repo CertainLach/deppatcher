@@ -3,6 +3,7 @@
 #![doc = include_str!("../README.md")]
 
 use std::{
+	collections::{BTreeMap, HashSet},
 	env::current_dir,
 	fs,
 	io::{stdin, Read},
@@ -11,14 +12,16 @@ use std::{
 };
 
 use clap::Parser;
+use guppy::graph::{DependencyDirection, ExternalSource, GitReq};
 use jrsonnet_cli::{ConfigureState, GeneralOpts, InputOpts};
 use jrsonnet_evaluator::{
-	error::{Result, ErrorKind},
+	error::{ErrorKind, Result},
 	function::{builtin, CallLocation, FuncVal},
+	throw,
 	typed::{Either2, NativeFn},
 	typed::{Null, Typed},
-	Either, ObjValue, ObjValueBuilder, State, Val,
-	throw, val::StrValue, trace::PathResolver, Thunk,
+	val::StrValue,
+	Either, ObjValue, ObjValueBuilder, State, Thunk, Val,
 };
 use toml_edit::{Document, InlineTable, Item, Table, TableLike, Value};
 use tracing::info;
@@ -35,7 +38,7 @@ where
 	}
 }
 
-#[derive(Typed, Debug, Clone, PartialEq, Eq)]
+#[derive(Typed, Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct DirectSource {
 	/// Package version, None if package is obtained not from registry
 	pub version: Option<String>,
@@ -87,7 +90,7 @@ impl DirectSource {
 	}
 }
 
-#[derive(Typed, Debug, Clone)]
+#[derive(Typed, Debug, Clone, PartialOrd, Ord, PartialEq, Eq)]
 pub struct DirectInput {
 	/// Name with which this package was referenced in `Cargo.toml`
 	/// ```toml
@@ -303,10 +306,18 @@ fn patch(path: &Path, mutator: &Mutator) -> Result<()> {
 /// Mass rewriter of Cargo.toml files
 #[allow(clippy::large_enum_variant)]
 #[derive(Parser)]
-#[clap(author)]
+#[clap(author, disable_version_flag = true)]
 enum Opts {
 	/// Rewrite package sources using specified rule
 	Patch {
+		#[clap(flatten)]
+		input: InputOpts,
+		#[clap(flatten)]
+		general: GeneralOpts,
+	},
+	/// Generate `[patch]` section in workspace Cargo.toml
+	/// Operates on `cargo metadata`, slower, but allows to rewrite other package dependencies
+	SoftPatch {
 		#[clap(flatten)]
 		input: InputOpts,
 		#[clap(flatten)]
@@ -327,7 +338,8 @@ enum Opts {
 fn load_paths(loc: CallLocation, workspace: String) -> Result<ObjValue> {
 	let mut path = match loc.0 {
 		Some(loc) => loc
-			.0.source_path()
+			.0
+			.source_path()
 			.path()
 			.map_or(current_dir().expect("no current dir?"), Path::to_path_buf),
 		None => throw!("only callable from jsonnet"),
@@ -387,16 +399,18 @@ fn main() -> Result<()> {
 			let s = State::default();
 
 			let mut dpp = ObjValueBuilder::new();
-			dpp.member("loadPaths".into()).value(
-				Val::Func(FuncVal::StaticBuiltin(load_paths::INST)),
-			)?;
+			dpp.member("loadPaths".into())
+				.value(Val::Func(FuncVal::StaticBuiltin(load_paths::INST)))?;
 			let dpp = dpp.build();
 
-			let std = jrsonnet_stdlib::ContextInitializer::new(s.clone(), PathResolver::new_cwd_fallback());
-			std.settings_mut().globals.insert("dpp".into(), Thunk::evaluated(Val::Obj(dpp)));
-			s.set_context_initializer(std);
-
 			general.configure(&s)?;
+			s.context_initializer()
+				.as_any()
+				.downcast_ref::<jrsonnet_stdlib::ContextInitializer>()
+				.expect("std")
+				.settings_mut()
+				.globals
+				.insert("dpp".into(), Thunk::evaluated(Val::Obj(dpp)));
 
 			let mutator = if input.exec {
 				s.evaluate_snippet("<cmdline>".to_string(), input.input)?
@@ -407,7 +421,8 @@ fn main() -> Result<()> {
 			} else {
 				s.import(PathBuf::from(input.input))?
 			};
-			let mutator = <NativeFn<((DirectInput,), Either![Null, DirectSource])>>::from_untyped(mutator)?;
+			let mutator =
+				<NativeFn<((DirectInput,), Either![Null, DirectSource])>>::from_untyped(mutator)?;
 
 			for entry in walkdir::WalkDir::new(current_dir().run_err()?) {
 				let entry = entry.run_err()?;
@@ -416,6 +431,155 @@ fn main() -> Result<()> {
 					patch(entry.path(), &*mutator)?;
 				}
 			}
+		}
+		Opts::SoftPatch { input, general } => {
+			let s = State::default();
+
+			let mut dpp = ObjValueBuilder::new();
+			dpp.member("loadPaths".into())
+				.value(Val::Func(FuncVal::StaticBuiltin(load_paths::INST)))?;
+			let dpp = dpp.build();
+
+			general.configure(&s)?;
+			s.context_initializer()
+				.as_any()
+				.downcast_ref::<jrsonnet_stdlib::ContextInitializer>()
+				.expect("std")
+				.settings_mut()
+				.globals
+				.insert("dpp".into(), Thunk::evaluated(Val::Obj(dpp)));
+
+			let mutator = if input.exec {
+				s.evaluate_snippet("<cmdline>".to_string(), input.input)?
+			} else if input.input.as_str() == "-" {
+				let mut code = String::new();
+				stdin().read_to_string(&mut code).run_err()?;
+				s.evaluate_snippet("<stdin>".to_string(), code)?
+			} else {
+				s.import(PathBuf::from(input.input))?
+			};
+			let mutator =
+				<NativeFn<((DirectInput,), Either![Null, DirectSource])>>::from_untyped(mutator)?;
+
+			let guppy = guppy::MetadataCommand::new().exec().run_err()?;
+			let graph = guppy.build_graph().run_err()?;
+
+			let mut output = <BTreeMap<DirectInput, DirectSource>>::new();
+
+			let mut visited = HashSet::new();
+			let mut to_visit = graph
+				.resolve_workspace()
+				.root_packages(DependencyDirection::Forward)
+				.map(|p| p.id())
+				.collect::<Vec<_>>();
+			while !to_visit.is_empty() {
+				for package in std::mem::take(&mut to_visit) {
+					// Somehow, this graph is cyclic
+					if !visited.insert(package) {
+						continue;
+					}
+
+					let pkg = graph
+						.packages()
+						.find(|i| i.id() == package)
+						.expect("bad graph");
+					for ele in pkg.direct_links() {
+						if !ele.normal().is_present() && !ele.build().is_present() {
+							continue;
+						}
+						let to = ele.to();
+						let source = ele.to().source();
+						let es = source.parse_external();
+						let git = match source.parse_external() {
+							Some(ExternalSource::Git {
+								repository,
+								req,
+								resolved,
+							}) => Some((repository.to_string(), req, resolved)),
+							_ => None,
+						};
+						let ds = DirectSource {
+							version: Some(to.version().to_string()),
+							registry: match es {
+								Some(ExternalSource::Registry(r)) => Some(r.to_string()),
+								_ => None,
+							},
+							path: source.local_path().map(|p| p.to_string()),
+							git: git.as_ref().map(|(r, _, _)| r.to_string()),
+							rev: git.as_ref().and_then(|(_, e, _)| match e {
+								GitReq::Rev(e) => Some(e.to_string()),
+								_ => None,
+							}),
+							tag: git.as_ref().and_then(|(_, e, _)| match e {
+								GitReq::Tag(t) => Some(t.to_string()),
+								_ => None,
+							}),
+							branch: git.as_ref().and_then(|(_, e, _)| match e {
+								GitReq::Branch(b) => Some(b.to_string()),
+								_ => None,
+							}),
+						};
+
+						let input = DirectInput {
+							package: to.name().to_string(),
+							name: to.name().to_string(),
+							// Not supported
+							original_source: ds.clone(),
+							source: ds.clone(),
+						};
+						if output.contains_key(&input) {
+							continue;
+						}
+
+						match (*mutator)(input.clone())? {
+							Either2::A(_) => {}
+							Either2::B(r) => {
+								if r != ds {
+									output.insert(input.clone(), r);
+								}
+							}
+						}
+						to_visit.push(ele.to().id())
+					}
+				}
+			}
+
+			let mut table = Document::new();
+			table.insert_formatted(&toml_edit::Key::new("patch"), Item::Table(Table::new()));
+			let patch_table = table
+				.get_mut("patch")
+				.expect("just inserted")
+				.as_table_mut()
+				.expect("table like");
+			patch_table.set_implicit(true);
+
+			for (k, v) in output {
+				let source = if let Some(reg) = &k.source.registry {
+					if reg == "https://github.com/rust-lang/crates.io-index" {
+						"crates-io".to_string()
+					} else {
+						throw!("no support for custom registries")
+					}
+				} else if let Some(git) = &k.source.git {
+					git.to_string()
+				} else {
+					throw!("unsupported source: {:?}", k.source)
+				};
+				let source_table = patch_table
+					.entry(&source)
+					.or_insert(Item::Table(Table::new()))
+					.as_table_mut()
+					.expect("table like");
+				source_table.set_implicit(false);
+				let item_table = source_table
+					.entry(&k.name)
+					.or_insert(Item::Value(Value::InlineTable(InlineTable::new())))
+					.as_table_like_mut()
+					.expect("table like");
+				v.write(item_table);
+			}
+
+			println!("{}", table);
 		}
 	}
 
