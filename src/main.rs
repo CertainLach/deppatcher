@@ -53,10 +53,12 @@ pub struct DirectSource {
 	pub rev: Option<String>,
 	pub tag: Option<String>,
 	pub branch: Option<String>,
+	pub workspace: Option<bool>,
 }
 impl DirectSource {
 	fn read(table: &dyn TableLike) -> Self {
 		let get = |s: &str| table.get(s).and_then(Item::as_str).map(ToOwned::to_owned);
+		let get_bool = |s: &str| table.get(s).and_then(Item::as_bool);
 		Self {
 			version: get("version"),
 			path: get("path"),
@@ -65,6 +67,7 @@ impl DirectSource {
 			tag: get("tag"),
 			branch: get("branch"),
 			registry: get("registry"),
+			workspace: get_bool("workspace"),
 		}
 	}
 	fn write(&self, table: &mut dyn TableLike) {
@@ -82,6 +85,14 @@ impl DirectSource {
 		set("tag", &self.tag);
 		set("branch", &self.branch);
 		set("registry", &self.registry);
+		let mut set_bool = |s: &str, v: &Option<bool>| {
+			if let Some(v) = v {
+				table.insert(s, Item::Value((*v).into()));
+			} else {
+				table.remove(s);
+			}
+		};
+		set_bool("workspace", &self.workspace);
 	}
 	fn to_table(&self) -> InlineTable {
 		let mut table = InlineTable::new();
@@ -535,6 +546,7 @@ fn main() -> Result<()> {
 								GitReq::Branch(b) => Some(b.to_string()),
 								_ => None,
 							}),
+							workspace: None,
 						};
 
 						let input = DirectInput {
