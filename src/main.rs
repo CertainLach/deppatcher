@@ -196,9 +196,32 @@ fn patch_target_table(
 	for kind in ["dependencies", "dev-dependencies", "build-dependencies"] {
 		if let Some(deps) = target.get_mut(kind).and_then(Item::as_table_mut) {
 			key.push(kind.to_owned());
-			patch_dep_table(originals, key, deps, mutator)?;
+			patch_dep_table(originals, key, deps, mutator, force_inline)?;
 			key.pop();
 		}
+	}
+	Ok(())
+}
+
+fn patch_root_table(
+	originals: &mut Item,
+	key: &mut Key,
+	table: &mut Table,
+	mutator: &Mutator,
+	force_inline: bool,
+) -> Result<()> {
+	patch_target_table(originals, key, table, mutator, force_inline)?;
+	if let Some(table) = table.get_mut("target").and_then(Item::as_table_mut) {
+		key.push("target".to_owned());
+		for (k, table) in table
+			.iter_mut()
+			.filter_map(|(k, t)| t.as_table_mut().map(|t| (k, t)))
+		{
+			key.push(k.get().to_owned());
+			patch_target_table(originals, key, table, mutator, force_inline)?;
+			key.pop();
+		}
+		key.pop();
 	}
 	Ok(())
 }
@@ -272,19 +295,13 @@ fn patch(path: &Path, mutator: &Mutator) -> Result<()> {
 	let table = doc.as_table_mut();
 
 	let mut key = Vec::new();
-	patch_target_table(&mut originals, &mut key, table, mutator)?;
-	if let Some(table) = table.get_mut("target").and_then(Item::as_table_mut) {
-		key.push("target".to_owned());
-		for (k, table) in table
-			.iter_mut()
-			.filter_map(|(k, t)| t.as_table_mut().map(|t| (k, t)))
-		{
-			key.push(k.get().to_owned());
-			patch_target_table(&mut originals, &mut key, table, mutator)?;
-			key.pop();
-		}
+	patch_root_table(&mut originals, &mut key, table, mutator, force_inline)?;
+	if let Some(table) = table.get_mut("workspace").and_then(Item::as_table_mut) {
+		key.push("workspace".to_owned());
+		patch_root_table(&mut originals, &mut key, table, mutator, force_inline)?;
 		key.pop();
 	}
+	assert_eq!(key.len(), 0);
 
 	set_table(
 		table,
