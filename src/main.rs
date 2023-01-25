@@ -308,6 +308,16 @@ fn freeze(path: &Path) -> Result<()> {
 		],
 		Item::None,
 	);
+	set_table(
+		doc.as_table_mut(),
+		&vec![
+			"workspace".to_owned(),
+			"metadata".to_owned(),
+			"deppatcher".to_owned(),
+			"originals".to_owned(),
+		],
+		Item::None,
+	);
 	let toml = doc.to_string();
 	fs::write(path, toml).run_err()?;
 	Ok(())
@@ -316,9 +326,14 @@ fn freeze(path: &Path) -> Result<()> {
 fn patch(path: &Path, mutator: &Mutator, force_inline: bool) -> Result<()> {
 	let toml = fs::read_to_string(path).run_err()?;
 	let mut doc: Document = toml.parse().run_err()?;
+	let metadata_root = if doc.contains_key("package") {
+		"package"
+	} else {
+		"workspace"
+	};
 	let mut originals = get_item(
 		doc.as_item(),
-		["package", "metadata", "deppatcher", "originals"],
+		[metadata_root, "metadata", "deppatcher", "originals"],
 	)
 	.cloned()
 	.unwrap_or_else(|| {
@@ -345,7 +360,7 @@ fn patch(path: &Path, mutator: &Mutator, force_inline: bool) -> Result<()> {
 	set_table(
 		table,
 		&vec![
-			"package".to_owned(),
+			metadata_root.to_owned(),
 			"metadata".to_owned(),
 			"deppatcher".to_owned(),
 			"originals".to_owned(),
