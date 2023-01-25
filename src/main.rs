@@ -131,6 +131,7 @@ fn patch_dep(
 	dep: &mut dyn TableLike,
 	mutator: &Mutator,
 ) -> Result<()> {
+	let force = false;
 	let name = key.iter().last().unwrap().as_str();
 	let package = dep
 		.get("package")
@@ -151,17 +152,20 @@ fn patch_dep(
 	};
 	let new_source = if let Either2::B(new_source) = mutator(input)? {
 		new_source
+	} else if force {
+		source.clone()
 	} else {
 		return Ok(());
 	};
 
-	if new_source == source {
+	if new_source == source && !force {
 		return Ok(());
 	}
 
 	info!("rewrite {} => {}", source.to_table(), new_source.to_table());
 
 	let originals = originals.as_table_mut().expect("is table checked");
+
 	if !had_original {
 		let name = key.pop().unwrap();
 		key.push(package);
@@ -186,13 +190,36 @@ fn patch_dep_table(
 	key: &mut Key,
 	deps: &mut Table,
 	mutator: &Mutator,
+	force_inline: bool,
 ) -> Result<()> {
 	for (d, table) in deps
 		.iter_mut()
-		.filter_map(|(k, t)| t.as_table_like_mut().map(|t| (k, t)))
+		.filter_map(|(k, t)| t.is_table_like().then(|| (k, t)))
 	{
 		key.push(d.get().to_owned());
-		patch_dep(originals, key, table, mutator)?;
+		patch_dep(
+			originals,
+			key,
+			table.as_table_like_mut().expect("is table checked"),
+			mutator,
+		)?;
+		if force_inline {
+			if let Some(astable) = table.as_table_mut() {
+				astable.set_implicit(true);
+				*table = Item::Value(Value::InlineTable(astable.clone().into_inline_table()))
+			}
+			if let Some(astable) = table.as_inline_table_mut() {
+				if astable.len() == 1 {
+					astable.set_dotted(true)
+				}
+			}
+		}
+		let astable = table.as_table_like().expect("is table checked");
+		if astable.len() == 1 {
+			if let Some(version) = table.get("version") {
+				*table = version.clone();
+			}
+		}
 		key.pop();
 	}
 	Ok(())
@@ -203,6 +230,7 @@ fn patch_target_table(
 	key: &mut Key,
 	target: &mut Table,
 	mutator: &Mutator,
+	force_inline: bool,
 ) -> Result<()> {
 	for kind in ["dependencies", "dev-dependencies", "build-dependencies"] {
 		if let Some(deps) = target.get_mut(kind).and_then(Item::as_table_mut) {
@@ -285,7 +313,7 @@ fn freeze(path: &Path) -> Result<()> {
 	Ok(())
 }
 
-fn patch(path: &Path, mutator: &Mutator) -> Result<()> {
+fn patch(path: &Path, mutator: &Mutator, force_inline: bool) -> Result<()> {
 	let toml = fs::read_to_string(path).run_err()?;
 	let mut doc: Document = toml.parse().run_err()?;
 	let mut originals = get_item(
@@ -338,6 +366,10 @@ fn patch(path: &Path, mutator: &Mutator) -> Result<()> {
 enum Opts {
 	/// Rewrite package sources using specified rule
 	Patch {
+		/// Format dependencies as inline table
+		#[clap(long)]
+		force_inline: bool,
+
 		#[clap(flatten)]
 		input: InputOpts,
 		#[clap(flatten)]
@@ -423,7 +455,11 @@ fn main() -> Result<()> {
 			}
 		}
 		Opts::Revert | Opts::Link { .. } => unreachable!("this is alias"),
-		Opts::Patch { input, general } => {
+		Opts::Patch {
+			input,
+			general,
+			force_inline,
+		} => {
 			let s = State::default();
 
 			let mut dpp = ObjValueBuilder::new();
@@ -456,7 +492,7 @@ fn main() -> Result<()> {
 				let entry = entry.run_err()?;
 				if entry.file_type().is_file() && entry.path().ends_with("Cargo.toml") {
 					info!("patching {}", entry.path().display());
-					patch(entry.path(), &*mutator)?;
+					patch(entry.path(), &*mutator, force_inline)?;
 				}
 			}
 		}
