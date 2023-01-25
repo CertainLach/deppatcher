@@ -3,6 +3,8 @@ name = 'deppatcher'
 authors = ["Yaroslav Bolyukin <iam@lach.pw>"]
 version = "0.1.0"
 edition = "2021"
+description = "Automate patching Cargo.toml files using jsonnet"
+license = "MIT"
 
 [dependencies]
 cargo_metadata = "0.15.2"
