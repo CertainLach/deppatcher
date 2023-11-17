@@ -222,6 +222,40 @@ fn patch_dep_table(
 		}
 		key.pop();
 	}
+	for (d, table) in deps
+		.iter_mut()
+		.filter_map(|(k, t)| t.is_str().then(|| (k, t)))
+	{
+		key.push(d.get().to_owned());
+		let mut tmp = Table::new();
+		tmp.insert("version", table.clone());
+		*table = Item::Table(tmp);
+			
+		patch_dep(
+			originals,
+			key,
+			table.as_table_like_mut().expect("is table checked"),
+			mutator,
+		)?;
+		if force_inline {
+			if let Some(astable) = table.as_table_mut() {
+				astable.set_implicit(true);
+				*table = Item::Value(Value::InlineTable(astable.clone().into_inline_table()))
+			}
+			if let Some(astable) = table.as_inline_table_mut() {
+				if astable.len() == 1 {
+					astable.set_dotted(true)
+				}
+			}
+		}
+		let astable = table.as_table_like().expect("is table checked");
+		if astable.len() == 1 {
+			if let Some(version) = table.get("version") {
+				*table = version.clone();
+			}
+		}
+		key.pop();
+	}
 	Ok(())
 }
 
@@ -404,6 +438,11 @@ enum Opts {
 	Link {
 		/// Workspace to link
 		workspace: String,
+		/// Use soft-patch instead of patch
+		#[clap(long)]
+		soft: bool,
+		#[clap(long)]
+		by_version: bool,
 	},
 	/// Remove all saved original packages
 	Freeze,
@@ -435,28 +474,68 @@ fn load_paths(loc: CallLocation, workspace: String) -> Result<ObjValue> {
 	Ok(out.build())
 }
 
+#[builtin]
+fn load_locked(loc: CallLocation, lockfile: String) -> Result<ObjValue> {
+	let mut path = match loc.0 {
+		Some(loc) => loc
+			.0
+			.source_path()
+			.path()
+			.map_or(current_dir().expect("no current dir?"), Path::to_path_buf),
+		None => throw!("only callable from jsonnet"),
+	};
+	path.push(lockfile);
+
+	let lockfile = cargo_lock::Lockfile::load(path).run_err()?;
+	let mut out = ObjValueBuilder::new();
+	for dep in lockfile.packages {
+		if dep.source.is_some() {
+			continue;
+		}
+		let _ = out.member(dep.name.to_string().into()).value(Val::Str(StrValue::Flat(dep.version.to_string().into())));
+	}
+	Ok(out.build())
+}
+
 fn main() -> Result<()> {
 	tracing_subscriber::fmt::init();
 
 	let mut opts = Opts::parse();
 	if let Opts::Revert = opts {
 		opts = Opts::parse_from(["deppatcher", "patch", "-e", "function(p) p.originalSource"]);
-	} else if let Opts::Link { workspace } = opts {
+	} else if let Opts::Link { workspace, soft, by_version } = opts {
 		let mut ext = String::new();
 		ext.push_str("linkTo=");
 		ext.push_str(&workspace);
 		opts = Opts::parse_from([
 			"deppatcher",
-			"patch",
+			if soft { "soft-patch" } else { "patch" },
 			"--ext-str",
 			&ext,
 			"-e",
-			r#"
+			if by_version {r#"
+				local linkFrom = dpp.loadLocked('./Cargo.lock');
+				local _linkTo = dpp.loadLocked(std.extVar('linkTo'));
+				local linkTo = {
+					[k]: _linkTo[k]
+					for k in std.objectFields(_linkTo)
+					if !(k in linkFrom)
+				};
+				function(pkg) if
+					std.objectHas(linkTo, pkg.package)
+					&& !std.get(pkg.source, 'workspace', false)
+				then {
+					version: linkTo[pkg.package],
+				}
+			"#} else {r#"
 				local linkTo = dpp.loadPaths(std.extVar('linkTo'));
-				function(pkg) if std.objectHas(linkTo, pkg.package) then {
+				function(pkg) if
+					std.objectHas(linkTo, pkg.package)
+					&& !std.get(pkg.source, 'workspace', false)
+				then {
 					path: linkTo[pkg.package],
 				}
-			"#,
+			"#},
 		]);
 	}
 	match opts {
@@ -480,6 +559,8 @@ fn main() -> Result<()> {
 			let mut dpp = ObjValueBuilder::new();
 			dpp.member("loadPaths".into())
 				.value(Val::Func(FuncVal::StaticBuiltin(load_paths::INST)))?;
+			dpp.member("loadLocked".into())
+				.value(Val::Func(FuncVal::StaticBuiltin(load_locked::INST)))?;
 			let dpp = dpp.build();
 
 			general.configure(&s)?;
@@ -517,6 +598,8 @@ fn main() -> Result<()> {
 			let mut dpp = ObjValueBuilder::new();
 			dpp.member("loadPaths".into())
 				.value(Val::Func(FuncVal::StaticBuiltin(load_paths::INST)))?;
+			dpp.member("loadLocked".into())
+				.value(Val::Func(FuncVal::StaticBuiltin(load_locked::INST)))?;
 			let dpp = dpp.build();
 
 			general.configure(&s)?;
@@ -642,6 +725,9 @@ fn main() -> Result<()> {
 					}
 				} else if let Some(git) = &k.source.git {
 					git.to_string()
+				} else if k.source.path.is_some()  {
+					eprintln!("path exists {:?}", k.source);
+					continue;
 				} else {
 					throw!("unsupported source: {:?}", k.source)
 				};
