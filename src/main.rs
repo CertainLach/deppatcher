@@ -8,21 +8,22 @@ use std::{
 	fs,
 	io::{stdin, Read},
 	path::{Path, PathBuf},
-	result,
+	result, string::ToString,
 };
 
 use clap::Parser;
 use guppy::graph::{DependencyDirection, ExternalSource, GitReq};
-use jrsonnet_cli::{ConfigureState, GeneralOpts, InputOpts};
+use jrsonnet_cli::{InputOpts, StdOpts};
 use jrsonnet_evaluator::{
+	bail,
 	error::{ErrorKind, Result},
 	function::{builtin, CallLocation, FuncVal},
-	throw,
-	typed::{Either2, NativeFn},
-	typed::{Null, Typed},
+	parser::Source,
+	typed::{Either2, NativeFn, Null, Typed},
 	val::StrValue,
-	Either, ObjValue, ObjValueBuilder, State, Thunk, Val,
+	ContextBuilder, ContextInitializer, Either, ObjValue, ObjValueBuilder, State, Thunk, Val,
 };
+use jrsonnet_gcmodule::Trace;
 use toml_edit::{Document, InlineTable, Item, Table, TableLike, Value};
 use tracing::info;
 
@@ -194,7 +195,7 @@ fn patch_dep_table(
 ) -> Result<()> {
 	for (d, table) in deps
 		.iter_mut()
-		.filter_map(|(k, t)| t.is_table_like().then(|| (k, t)))
+		.filter_map(|(k, t)| t.is_table_like().then_some((k, t)))
 	{
 		key.push(d.get().to_owned());
 		patch_dep(
@@ -206,11 +207,11 @@ fn patch_dep_table(
 		if force_inline {
 			if let Some(astable) = table.as_table_mut() {
 				astable.set_implicit(true);
-				*table = Item::Value(Value::InlineTable(astable.clone().into_inline_table()))
+				*table = Item::Value(Value::InlineTable(astable.clone().into_inline_table()));
 			}
 			if let Some(astable) = table.as_inline_table_mut() {
 				if astable.len() == 1 {
-					astable.set_dotted(true)
+					astable.set_dotted(true);
 				}
 			}
 		}
@@ -224,13 +225,13 @@ fn patch_dep_table(
 	}
 	for (d, table) in deps
 		.iter_mut()
-		.filter_map(|(k, t)| t.is_str().then(|| (k, t)))
+		.filter_map(|(k, t)| t.is_str().then_some((k, t)))
 	{
 		key.push(d.get().to_owned());
 		let mut tmp = Table::new();
 		tmp.insert("version", table.clone());
 		*table = Item::Table(tmp);
-			
+
 		patch_dep(
 			originals,
 			key,
@@ -240,11 +241,11 @@ fn patch_dep_table(
 		if force_inline {
 			if let Some(astable) = table.as_table_mut() {
 				astable.set_implicit(true);
-				*table = Item::Value(Value::InlineTable(astable.clone().into_inline_table()))
+				*table = Item::Value(Value::InlineTable(astable.clone().into_inline_table()));
 			}
 			if let Some(astable) = table.as_inline_table_mut() {
 				if astable.len() == 1 {
-					astable.set_dotted(true)
+					astable.set_dotted(true);
 				}
 			}
 		}
@@ -377,7 +378,7 @@ fn patch(path: &Path, mutator: &Mutator, force_inline: bool) -> Result<()> {
 	});
 
 	if !originals.is_table() {
-		throw!("originals should be table");
+		bail!("originals should be table");
 	}
 
 	let table = doc.as_table_mut();
@@ -422,7 +423,7 @@ enum Opts {
 		#[clap(flatten)]
 		input: InputOpts,
 		#[clap(flatten)]
-		general: GeneralOpts,
+		std: StdOpts,
 	},
 	/// Generate `[patch]` section in workspace Cargo.toml
 	/// Operates on `cargo metadata`, slower, but allows to rewrite other package dependencies
@@ -430,7 +431,7 @@ enum Opts {
 		#[clap(flatten)]
 		input: InputOpts,
 		#[clap(flatten)]
-		general: GeneralOpts,
+		std: StdOpts,
 	},
 	/// Revert back to original packages version
 	Revert,
@@ -456,7 +457,7 @@ fn load_paths(loc: CallLocation, workspace: String) -> Result<ObjValue> {
 			.source_path()
 			.path()
 			.map_or(current_dir().expect("no current dir?"), Path::to_path_buf),
-		None => throw!("only callable from jsonnet"),
+		None => bail!("only callable from jsonnet"),
 	};
 	path.push(workspace);
 
@@ -468,8 +469,8 @@ fn load_paths(loc: CallLocation, workspace: String) -> Result<ObjValue> {
 	let mut out = ObjValueBuilder::new();
 	for package in &metadata.packages {
 		let path = package.manifest_path.parent().unwrap();
-		out.member(package.name.clone().into())
-			.value(Val::Str(StrValue::Flat(path.to_string().into())))?;
+		out.field(package.name.clone())
+			.value(Val::Str(StrValue::Flat(path.to_string().into())));
 	}
 	Ok(out.build())
 }
@@ -482,7 +483,7 @@ fn load_locked(loc: CallLocation, lockfile: String) -> Result<ObjValue> {
 			.source_path()
 			.path()
 			.map_or(current_dir().expect("no current dir?"), Path::to_path_buf),
-		None => throw!("only callable from jsonnet"),
+		None => bail!("only callable from jsonnet"),
 	};
 	path.push(lockfile);
 
@@ -492,18 +493,43 @@ fn load_locked(loc: CallLocation, lockfile: String) -> Result<ObjValue> {
 		if dep.source.is_some() {
 			continue;
 		}
-		let _ = out.member(dep.name.to_string().into()).value(Val::Str(StrValue::Flat(dep.version.to_string().into())));
+		out.field(dep.name.to_string())
+			.value(Val::Str(StrValue::Flat(dep.version.to_string().into())));
 	}
 	Ok(out.build())
 }
 
+#[derive(Trace)]
+struct DppContextInitializer;
+impl ContextInitializer for DppContextInitializer {
+	fn populate(&self, _for_file: Source, builder: &mut ContextBuilder) {
+		let mut dpp = ObjValueBuilder::new();
+		dpp.field("loadPaths")
+			.value(Val::Func(FuncVal::StaticBuiltin(load_paths::INST)));
+		dpp.field("loadLocked")
+			.value(Val::Func(FuncVal::StaticBuiltin(load_locked::INST)));
+		let dpp = dpp.build();
+		builder.bind("dpp", Thunk::evaluated(Val::from(dpp)));
+	}
+
+	fn as_any(&self) -> &dyn std::any::Any {
+		self
+	}
+}
+
+#[allow(clippy::too_many_lines, clippy::cognitive_complexity)]
 fn main() -> Result<()> {
 	tracing_subscriber::fmt::init();
 
 	let mut opts = Opts::parse();
-	if let Opts::Revert = opts {
+	if matches!(opts, Opts::Revert) {
 		opts = Opts::parse_from(["deppatcher", "patch", "-e", "function(p) p.originalSource"]);
-	} else if let Opts::Link { workspace, soft, by_version } = opts {
+	} else if let Opts::Link {
+		workspace,
+		soft,
+		by_version,
+	} = opts
+	{
 		let mut ext = String::new();
 		ext.push_str("linkTo=");
 		ext.push_str(&workspace);
@@ -513,29 +539,33 @@ fn main() -> Result<()> {
 			"--ext-str",
 			&ext,
 			"-e",
-			if by_version {r#"
-				local linkFrom = dpp.loadLocked('./Cargo.lock');
-				local _linkTo = dpp.loadLocked(std.extVar('linkTo'));
-				local linkTo = {
-					[k]: _linkTo[k]
-					for k in std.objectFields(_linkTo)
-					if !(k in linkFrom)
-				};
-				function(pkg) if
-					std.objectHas(linkTo, pkg.package)
-					&& !std.get(pkg.source, 'workspace', false)
-				then {
-					version: linkTo[pkg.package],
-				}
-			"#} else {r#"
-				local linkTo = dpp.loadPaths(std.extVar('linkTo'));
-				function(pkg) if
-					std.objectHas(linkTo, pkg.package)
-					&& !std.get(pkg.source, 'workspace', false)
-				then {
-					path: linkTo[pkg.package],
-				}
-			"#},
+			if by_version {
+				r"
+					local linkFrom = dpp.loadLocked('./Cargo.lock');
+					local _linkTo = dpp.loadLocked(std.extVar('linkTo'));
+					local linkTo = {
+						[k]: _linkTo[k]
+						for k in std.objectFields(_linkTo)
+						if !(k in linkFrom)
+					};
+					function(pkg) if
+						std.objectHas(linkTo, pkg.package)
+						&& !std.get(pkg.source, 'workspace', false)
+					then {
+						version: linkTo[pkg.package],
+					}
+				"
+			} else {
+				r"
+					local linkTo = dpp.loadPaths(std.extVar('linkTo'));
+					function(pkg) if
+						std.objectHas(linkTo, pkg.package)
+						&& !std.get(pkg.source, 'workspace', false)
+					then {
+						path: linkTo[pkg.package],
+					}
+				"
+			},
 		]);
 	}
 	match opts {
@@ -551,26 +581,15 @@ fn main() -> Result<()> {
 		Opts::Revert | Opts::Link { .. } => unreachable!("this is alias"),
 		Opts::Patch {
 			input,
-			general,
 			force_inline,
+			std,
 		} => {
 			let s = State::default();
 
-			let mut dpp = ObjValueBuilder::new();
-			dpp.member("loadPaths".into())
-				.value(Val::Func(FuncVal::StaticBuiltin(load_paths::INST)))?;
-			dpp.member("loadLocked".into())
-				.value(Val::Func(FuncVal::StaticBuiltin(load_locked::INST)))?;
-			let dpp = dpp.build();
-
-			general.configure(&s)?;
-			s.context_initializer()
-				.as_any()
-				.downcast_ref::<jrsonnet_stdlib::ContextInitializer>()
-				.expect("std")
-				.settings_mut()
-				.globals
-				.insert("dpp".into(), Thunk::evaluated(Val::Obj(dpp)));
+			s.set_context_initializer((
+				std.context_initializer(&s)?.expect("nostd is not working"),
+				DppContextInitializer,
+			));
 
 			let mutator = if input.exec {
 				s.evaluate_snippet("<cmdline>".to_string(), input.input)?
@@ -592,24 +611,13 @@ fn main() -> Result<()> {
 				}
 			}
 		}
-		Opts::SoftPatch { input, general } => {
+		Opts::SoftPatch { input, std } => {
 			let s = State::default();
 
-			let mut dpp = ObjValueBuilder::new();
-			dpp.member("loadPaths".into())
-				.value(Val::Func(FuncVal::StaticBuiltin(load_paths::INST)))?;
-			dpp.member("loadLocked".into())
-				.value(Val::Func(FuncVal::StaticBuiltin(load_locked::INST)))?;
-			let dpp = dpp.build();
-
-			general.configure(&s)?;
-			s.context_initializer()
-				.as_any()
-				.downcast_ref::<jrsonnet_stdlib::ContextInitializer>()
-				.expect("std")
-				.settings_mut()
-				.globals
-				.insert("dpp".into(), Thunk::evaluated(Val::Obj(dpp)));
+			s.set_context_initializer((
+				std.context_initializer(&s)?.expect("nostd is not working"),
+				DppContextInitializer,
+			));
 
 			let mutator = if input.exec {
 				s.evaluate_snippet("<cmdline>".to_string(), input.input)?
@@ -666,18 +674,18 @@ fn main() -> Result<()> {
 								Some(ExternalSource::Registry(r)) => Some(r.to_string()),
 								_ => None,
 							},
-							path: source.local_path().map(|p| p.to_string()),
+							path: source.local_path().map(ToString::to_string),
 							git: git.as_ref().map(|(r, _, _)| r.to_string()),
 							rev: git.as_ref().and_then(|(_, e, _)| match e {
-								GitReq::Rev(e) => Some(e.to_string()),
+								GitReq::Rev(e) => Some((*e).to_string()),
 								_ => None,
 							}),
 							tag: git.as_ref().and_then(|(_, e, _)| match e {
-								GitReq::Tag(t) => Some(t.to_string()),
+								GitReq::Tag(t) => Some((*t).to_string()),
 								_ => None,
 							}),
 							branch: git.as_ref().and_then(|(_, e, _)| match e {
-								GitReq::Branch(b) => Some(b.to_string()),
+								GitReq::Branch(b) => Some((*b).to_string()),
 								_ => None,
 							}),
 							workspace: None,
@@ -702,7 +710,7 @@ fn main() -> Result<()> {
 								}
 							}
 						}
-						to_visit.push(ele.to().id())
+						to_visit.push(ele.to().id());
 					}
 				}
 			}
@@ -721,15 +729,15 @@ fn main() -> Result<()> {
 					if reg == "https://github.com/rust-lang/crates.io-index" {
 						"crates-io".to_string()
 					} else {
-						throw!("no support for custom registries")
+						bail!("no support for custom registries")
 					}
 				} else if let Some(git) = &k.source.git {
 					git.to_string()
-				} else if k.source.path.is_some()  {
+				} else if k.source.path.is_some() {
 					eprintln!("path exists {:?}", k.source);
 					continue;
 				} else {
-					throw!("unsupported source: {:?}", k.source)
+					bail!("unsupported source: {:?}", k.source)
 				};
 				let source_table = patch_table
 					.entry(&source)
@@ -745,7 +753,7 @@ fn main() -> Result<()> {
 				v.write(item_table);
 			}
 
-			println!("{}", table);
+			println!("{table}");
 		}
 	}
 

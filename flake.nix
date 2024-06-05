@@ -16,8 +16,8 @@
           inherit system;
           overlays = [ rust-overlay.overlays.default ];
         };
-        rust = ((pkgs.rustChannelOf { date = "2023-11-05"; channel = "nightly"; }).default.override {
-          extensions = [ "rust-src" "clippy" ];
+        rust = ((pkgs.rustChannelOf { date = "2024-05-01"; channel = "nightly"; }).default.override {
+          extensions = [ "rust-src" "clippy" "rust-analyzer" ];
         });
       in
       rec {
