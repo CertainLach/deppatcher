@@ -8,7 +8,8 @@ use std::{
 	fs,
 	io::{stdin, Read},
 	path::{Path, PathBuf},
-	result, string::ToString,
+	result,
+	string::ToString,
 };
 
 use clap::Parser;
@@ -24,7 +25,7 @@ use jrsonnet_evaluator::{
 	ContextBuilder, ContextInitializer, Either, ObjValue, ObjValueBuilder, State, Thunk, Val,
 };
 use jrsonnet_gcmodule::Trace;
-use toml_edit::{Document, InlineTable, Item, Table, TableLike, Value};
+use toml_edit::{Document, Formatted, InlineTable, Item, Table, TableLike, Value};
 use tracing::info;
 
 trait ToRuntime<T> {
@@ -227,10 +228,14 @@ fn patch_dep_table(
 		.iter_mut()
 		.filter_map(|(k, t)| t.is_str().then_some((k, t)))
 	{
+		let version = Value::String(Formatted::new(
+			table.as_str().expect("iterating over strings").to_owned(),
+		));
 		key.push(d.get().to_owned());
-		let mut tmp = Table::new();
-		tmp.insert("version", table.clone());
-		*table = Item::Table(tmp);
+		let mut tmp = InlineTable::new();
+		tmp.insert("version", version);
+		// Assuming no one will use `package=version` syntax, when one prefers non-inline table for dependencies (actual psychos).
+		*table = Item::Value(Value::InlineTable(tmp));
 
 		patch_dep(
 			originals,
