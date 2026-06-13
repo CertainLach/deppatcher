@@ -18,14 +18,14 @@ use jrsonnet_cli::{InputOpts, StdOpts};
 use jrsonnet_evaluator::{
 	bail,
 	error::{ErrorKind, Result},
-	function::{builtin, CallLocation, FuncVal},
-	parser::Source,
-	typed::{Either2, NativeFn, Null, Typed},
+	function::{builtin, CallLocation, NativeFn},
+	typed::{Either2, FromUntyped, IntoUntyped, Typed},
 	val::StrValue,
-	ContextBuilder, ContextInitializer, Either, ObjValue, ObjValueBuilder, State, Thunk, Val,
+	ContextInitializer, Either, InitialContextBuilder, ObjValue, ObjValueBuilder, Source, State,
+	Thunk, Val,
 };
 use jrsonnet_gcmodule::Trace;
-use toml_edit::{Document, Formatted, InlineTable, Item, Table, TableLike, Value};
+use toml_edit::{DocumentMut, Formatted, InlineTable, Item, Table, TableLike, Value};
 use tracing::info;
 
 trait ToRuntime<T> {
@@ -40,7 +40,7 @@ where
 	}
 }
 
-#[derive(Typed, Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
+#[derive(Typed, IntoUntyped, FromUntyped, Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct DirectSource {
 	/// Package version, None if package is obtained not from registry
 	pub version: Option<String>,
@@ -103,7 +103,7 @@ impl DirectSource {
 	}
 }
 
-#[derive(Typed, Debug, Clone, PartialOrd, Ord, PartialEq, Eq)]
+#[derive(Typed, IntoUntyped, Debug, Clone, PartialOrd, Ord, PartialEq, Eq)]
 pub struct DirectInput {
 	/// Name with which this package was referenced in `Cargo.toml`
 	/// ```toml
@@ -125,7 +125,7 @@ pub struct DirectInput {
 
 type Key = Vec<String>;
 
-type Mutator = dyn Fn(DirectInput) -> Result<Either![Null, DirectSource]>;
+type Mutator = dyn Fn(DirectInput) -> Result<Either![(), DirectSource]>;
 
 fn patch_dep(
 	originals: &mut Item,
@@ -337,7 +337,7 @@ fn set_table(mut table: &mut Table, key: &Key, value: Item) {
 
 fn freeze(path: &Path) -> Result<()> {
 	let toml = fs::read_to_string(path).run_err()?;
-	let mut doc: Document = toml.parse().run_err()?;
+	let mut doc: DocumentMut = toml.parse().run_err()?;
 	set_table(
 		doc.as_table_mut(),
 		&vec![
@@ -365,7 +365,7 @@ fn freeze(path: &Path) -> Result<()> {
 
 fn patch(path: &Path, mutator: &Mutator, force_inline: bool) -> Result<()> {
 	let toml = fs::read_to_string(path).run_err()?;
-	let mut doc: Document = toml.parse().run_err()?;
+	let mut doc: DocumentMut = toml.parse().run_err()?;
 	let metadata_root = if doc.contains_key("package") {
 		"package"
 	} else {
@@ -474,7 +474,7 @@ fn load_paths(loc: CallLocation, workspace: String) -> Result<ObjValue> {
 	let mut out = ObjValueBuilder::new();
 	for package in &metadata.packages {
 		let path = package.manifest_path.parent().unwrap();
-		out.field(package.name.clone())
+		out.field(package.name.to_string())
 			.value(Val::Str(StrValue::Flat(path.to_string().into())));
 	}
 	Ok(out.build())
@@ -507,12 +507,10 @@ fn load_locked(loc: CallLocation, lockfile: String) -> Result<ObjValue> {
 #[derive(Trace)]
 struct DppContextInitializer;
 impl ContextInitializer for DppContextInitializer {
-	fn populate(&self, _for_file: Source, builder: &mut ContextBuilder) {
+	fn populate(&self, _for_file: Source, builder: &mut InitialContextBuilder) {
 		let mut dpp = ObjValueBuilder::new();
-		dpp.field("loadPaths")
-			.value(Val::Func(FuncVal::StaticBuiltin(load_paths::INST)));
-		dpp.field("loadLocked")
-			.value(Val::Func(FuncVal::StaticBuiltin(load_locked::INST)));
+		dpp.method("loadPaths", load_paths {});
+		dpp.method("loadLocked", load_locked {});
 		let dpp = dpp.build();
 		builder.bind("dpp", Thunk::evaluated(Val::from(dpp)));
 	}
@@ -589,12 +587,14 @@ fn main() -> Result<()> {
 			force_inline,
 			std,
 		} => {
-			let s = State::default();
+			let mut s = State::builder();
 
-			s.set_context_initializer((
-				std.context_initializer(&s)?.expect("nostd is not working"),
+			s.context_initializer((
+				std.context_initializer()?.expect("nostd is not working"),
 				DppContextInitializer,
 			));
+
+			let s = s.build();
 
 			let mutator = if input.exec {
 				s.evaluate_snippet("<cmdline>".to_string(), input.input)?
@@ -603,26 +603,29 @@ fn main() -> Result<()> {
 				stdin().read_to_string(&mut code).run_err()?;
 				s.evaluate_snippet("<stdin>".to_string(), code)?
 			} else {
-				s.import(PathBuf::from(input.input))?
+				s.import(PathBuf::from(input.input).as_path())?
 			};
 			let mutator =
-				<NativeFn<((DirectInput,), Either![Null, DirectSource])>>::from_untyped(mutator)?;
+				<NativeFn!((DirectInput) -> Either![(), DirectSource])>::from_untyped(mutator)?;
 
 			for entry in walkdir::WalkDir::new(current_dir().run_err()?) {
 				let entry = entry.run_err()?;
 				if entry.file_type().is_file() && entry.path().ends_with("Cargo.toml") {
 					info!("patching {}", entry.path().display());
-					patch(entry.path(), &*mutator, force_inline)?;
+					let mutator = mutator.clone();
+					patch(entry.path(), &move |a| mutator.call(a), force_inline)?;
 				}
 			}
 		}
 		Opts::SoftPatch { input, std } => {
-			let s = State::default();
+			let mut s = State::builder();
 
-			s.set_context_initializer((
-				std.context_initializer(&s)?.expect("nostd is not working"),
+			s.context_initializer((
+				std.context_initializer()?.expect("nostd is not working"),
 				DppContextInitializer,
 			));
+
+			let s = s.build();
 
 			let mutator = if input.exec {
 				s.evaluate_snippet("<cmdline>".to_string(), input.input)?
@@ -631,10 +634,10 @@ fn main() -> Result<()> {
 				stdin().read_to_string(&mut code).run_err()?;
 				s.evaluate_snippet("<stdin>".to_string(), code)?
 			} else {
-				s.import(PathBuf::from(input.input))?
+				s.import(PathBuf::from(input.input).as_path())?
 			};
 			let mutator =
-				<NativeFn<((DirectInput,), Either![Null, DirectSource])>>::from_untyped(mutator)?;
+				<NativeFn!((DirectInput) -> Either![(), DirectSource])>::from_untyped(mutator)?;
 
 			let guppy = guppy::MetadataCommand::new().exec().run_err()?;
 			let graph = guppy.build_graph().run_err()?;
@@ -707,7 +710,7 @@ fn main() -> Result<()> {
 							continue;
 						}
 
-						match (*mutator)(input.clone())? {
+						match mutator.call(input.clone())? {
 							Either2::A(_) => {}
 							Either2::B(r) => {
 								if r != ds {
@@ -720,7 +723,7 @@ fn main() -> Result<()> {
 				}
 			}
 
-			let mut table = Document::new();
+			let mut table = DocumentMut::new();
 			table.insert_formatted(&toml_edit::Key::new("patch"), Item::Table(Table::new()));
 			let patch_table = table
 				.get_mut("patch")
